@@ -10,7 +10,8 @@ When having trouble downloading R packages:
 # Preprocessing files and metadata 
 Check scripts: 
 01.Rename_files.ipynb
-02.Process_metadata.ipynb
+02.Concat_repeat_files.ipynb
+03.Process_metadata.ipynb
 
 # Quality Control - before trimming/clipping
 ```
@@ -37,18 +38,8 @@ multiqc fastqc_before
 mv multiqc_report.html multiqc_report_before.html
 ```
 
-# Remove repeated fastq files
-```
-cd repetidos2
-mv *.fastq ../repetidos
-```
-```
-cd ../repetidos
-mv *.fastq ../
-```
-
 # Trimming raw files
-Check script: 03.Trimming_raw_files.ipynb
+Check script: 04.Trimming_raw_files.ipynb
 
 # Quality control - after trimming/clipping
 ```

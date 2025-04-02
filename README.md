@@ -77,10 +77,8 @@ Used the same files used to annotate reads from mangrove sediments (16S RefSeq D
 
 ## Sending all my filtered fastq files to my data dir
 ```
-mkdir filtered_fastq # inside data dir
-mkdir 16sequences_index_kma
-mkdir output_16s_refseq
-mv raw_data/filtered/*_filt.fastq ./filtered_fastq
+mkdir -p filtered_fastq 16sequences_index_kma output_16s_refseq # inside data dir 
+mv raw_data/concatenated/chopper_filter//*_filtered.fastq ./filtered_fastq
 ```
 
 ## Create the databases needed to run KMA from a list of FASTA files
@@ -92,19 +90,19 @@ kma_index -i 16Ssequences.fasta -o 16sequences_index_kma/16Ssequences
 ```
 for file in filtered_fastq/*.fastq; do
     filename=$(basename "$file")  # Extract the filename
-    filename_no_ext="${filename%.}"  # Remove the file extension
-    kma -i "$file" -o "output_16s_refseq/${filename_no_ext}_kma" -t_db 16sequences_index_kma/16Ssequences -bcNano -bc 0.7
+    filename_no_ext="${filename%.fastq}"  # Remove the file extension
+    kma -i "$file" -o "output_16s_refseq/${filename_no_ext}_kma" -t_db 16sequences_index_kma/16Ssequences -bcNano -bc 0.7 -ID 90 -ml 400 -1t1 -t 5
 done 
 ```
 
-## Unzipping frag files to use as input for taxonomical assignation 
+### Unzipping frag files to use as input for taxonomical assignation 
 ```
 gunzip ./*_kma.frag.gz 
 mv ./*.frag .. # move them all into data folder to ease downstream coding
 ```
 
 # Taxonomy assignation to nanopore reads
-Check script: 04.Assin_Taxonomy.ipynb
+Check script: 05.Assin_Taxonomy.ipynb
 
 # Visualize the distribution of the number of reads across samples
 Check script: 04.Visualize_nreads_distribution.ipynb

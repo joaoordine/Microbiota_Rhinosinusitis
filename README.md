@@ -51,6 +51,8 @@ for file in *.fastq; do
     chopper --quality 12 --minlength 1200 --maxlength 1800 --headcrop 100 --tailcrop 200 --threads 5 --input "$file" > chopper_filter/"${file%.fastq}_filtered.fastq"
 done
 ```
+## Count number of retained reads after 
+Check script 04.Chopper_counts.ipynb
 
 # Quality control - after trimming raw ONT reads - NanoPack
 ```

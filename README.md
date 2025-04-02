@@ -69,11 +69,13 @@ for file in *.fastq; do
     nanoQC -o nanoqc_out/ -l 400 "$file" 
 done
 ```
+# Visualize the distribution of the number of reads across samples
+Check script: 05.Visualize_nreads_distribution.ipynb
 
 # Custom database creation
 Used the same files used to annotate reads from mangrove sediments (16S RefSeq DB - NCBI)
 *Files to copy*: 16Ssequences.fasta, new_taxdump.tar.gz (uncompressed files), RefseqTaxID.txt, referencetable_taxonomy_RefseqNCBI_16S.txt
-*Copy from*: https://github.com/joaoordine/mangrove_microbiota/tree/main - /data/ folder
+*Copy from*: MicroEcoLab server - 16S databases
 
 ## Sending all my filtered fastq files to my data dir
 ```
@@ -102,16 +104,13 @@ mv ./*.frag .. # move them all into data folder to ease downstream coding
 ```
 
 # Taxonomy assignation to nanopore reads
-Check script: 05.Assin_Taxonomy.ipynb
-
-# Visualize the distribution of the number of reads across samples
-Check script: 04.Visualize_nreads_distribution.ipynb
+Check script: 06.Assin_Taxonomy.ipynb
 
 # Diversity analysis
 Check scripts:
-05.Diversity_preprocess_rarefy.ipynb
-06.Diversity_alpha.ipynb
-07.Diversity_beta.ipynb
+07.Diversity_preprocess_rarefy.ipynb
+08.Diversity_alpha.ipynb
+09.Diversity_beta.ipynb
 
 
 

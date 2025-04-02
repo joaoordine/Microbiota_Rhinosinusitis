@@ -7,48 +7,62 @@ When having trouble downloading R packages:
 1. download them straight from R (opened in the terminal) - select any USA mirror
 2. download them through conda repositories
 
+# Make metadata_nreads file for raw fastq
+```
+echo -e "ID_Sample\tFilename\tnreads\tPatient\tTimepoint" > metadata_nreads.tsv # make the header
+
+for file in *.fastq; do 
+    nreads=$(($(wc -l < "$file") / 4))  # Count reads efficiently
+    ID_Sample="${file%.fastq}"  # Remove .fastq extension
+    Patient=$(echo "$ID_Sample" | sed -E 's/_T[0-9]+$//')  # Extract Patient ID
+    Timepoint=$(echo "$ID_Sample" | grep -oE 'T[0-9]+$')  # Extract Timepoint
+    echo -e "$ID_Sample\t$file\t$nreads\t$Patient\t$Timepoint" >> metadata_nreads.tsv # append it at the bottom of the header
+done
+```
+
 # Preprocessing files and metadata 
 Check scripts: 
 01.Rename_files.ipynb
-02.Concat_repeat_files.ipynb
+02.Concat_repeat_files.ipynb *
 03.Process_metadata.ipynb
 
-# Quality Control - before trimming/clipping
-```
-cd raw_data # create this dir inside data
-mkdir -p fastqc_before
-fastqc -o fastqc_before *.fastq
-multiqc fastqc_before
-mv multiqc_report.html multiqc_report_before.html
-```
+* PS.: I've previously checked the quality of those samples that were sequenced more than once. Since the quality overall wasn't improved considerably, I simply concatenated them in a single fastq file to ease downstream processing.  
 
-## Do the same for each 'repetidos' directory 
+# Quality control - before trimming raw ONT reads - NanoPack
 ```
-cd repetidos
-mkdir fastqc_before
-fastqc -o fastqc_before *.fastq
-multiqc fastqc_before
-mv multiqc_report.html multiqc_report_before.html
-```
-```
-cd ../repetidos2
-mkdir fastqc_before
-fastqc -o fastqc_before *.fastq
-multiqc fastqc_before
-mv multiqc_report.html multiqc_report_before.html
+cd raw_data/concatenated # create this dir inside data
+mkdir -p nanoqc_out
+# NanoPlot
+NanoPlot -o nanoqc_out/ --no_static --tsv_stats --N50 --threads 5 --fastq *.fastq 
+
+# NanoComp
+NanoComp -o nanoqc_out/ -t 5 --tsv_stats --make_no_static --fastq *.fastq
+
+# nanoQC
+for file in *.fastq; do
+    nanoQC -o nanoqc_out/ -l 400 "$file" 
+done
 ```
 
 # Trimming raw files
 Check script: 04.Trimming_raw_files.ipynb
 
-# Quality control - after trimming/clipping
+# Quality control - after trimming raw ONT reads - NanoPack
 ```
-cd filtered
-mkdir fastqc_after # I created this directory inside the `filtered`one 
-fastqc -o fastqc_after *.fastq
-multiqc fastqc_after
-mv multiqc_report.html multiqc_report_after.html
+cd raw_data/concatenated # create this dir inside data
+mkdir -p nanoqc_out
+# NanoPlot
+NanoPlot -o nanoqc_out/ --no_static --tsv_stats --N50 --threads 5 --fastq *.fastq 
+
+# NanoComp
+NanoComp -o nanoqc_out/ -t 5 --tsv_stats --make_no_static --fastq *.fastq
+
+# nanoQC
+for file in *.fastq; do
+    nanoQC -o nanoqc_out/ -l 400 "$file" 
+done
 ```
+
 # Custom database creation
 Used the same files used to annotate reads from mangrove sediments (16S RefSeq DB - NCBI)
 *Files to copy*: 16Ssequences.fasta, new_taxdump.tar.gz (uncompressed files), RefseqTaxID.txt, referencetable_taxonomy_RefseqNCBI_16S.txt

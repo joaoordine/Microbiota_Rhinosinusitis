@@ -44,12 +44,17 @@ for file in *.fastq; do
 done
 ```
 
-# Trimming raw files
-Check script: 04.Trimming_raw_files.ipynb
+# Trimming raw files - Chopper
+```
+mkdir -p chopper_filter
+for file in *.fastq; do
+    chopper --quality 12 --minlength 1200 --maxlength 1800 --headcrop 100 --tailcrop 200 --threads 5 --input "$file" > chopper_filter/"${file%.fastq}_filtered.fastq"
+done
+```
 
 # Quality control - after trimming raw ONT reads - NanoPack
 ```
-cd raw_data/concatenated # create this dir inside data
+cd raw_data/concatenated/chopper_filter # create this dir inside data
 mkdir -p nanoqc_out
 # NanoPlot
 NanoPlot -o nanoqc_out/ --no_static --tsv_stats --N50 --threads 5 --fastq *.fastq 

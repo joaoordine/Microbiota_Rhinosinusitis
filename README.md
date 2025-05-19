@@ -72,35 +72,64 @@ done
 # Visualize the distribution of the number of reads across samples
 Check script: 05.Visualize_nreads_distribution.ipynb
 
-# Custom database creation
-Used the same files used to annotate reads from mangrove sediments (16S RefSeq DB - NCBI)
-*Files to copy*: 16Ssequences.fasta, new_taxdump.tar.gz (uncompressed files), RefseqTaxID.txt, referencetable_taxonomy_RefseqNCBI_16S.txt
-*Copy from*: MicroEcoLab server - 16S databases
+# SILVA 16S Database downloaded for annotation
+## Download and extract full SILVA 16S database 
+https://www.arb-silva.de/no_cache/download/archive/current/Exports/ ## choose SILVA_138.2_SSURef_NR99_tax_silva.fasta.gz or the current version 
+
+```
+gunzip SILVA_138.2_SSURef_NR99_tax_silva.fasta.gz # move it to data dir and unzip it
+```
+
+## Pre-process db before annotation
+### Filter out eukaryotic sequences 
+```
+awk '/^>/ {p = ($0 ~ /Bacteria;/)} p' SILVA_138.2_SSURef_NR99_tax_silva.fasta > SILVA138.2_16S_Bacteria.fasta 
+```
+
+### Make a taxonomical table linked with the ID from Silva
+```
+grep "^>" SILVA138.2_16S_Bacteria.fasta > headers_silva.txt
+awk -F' ' '{print $1 "," substr($0, index($0,$2))}' headers_silva.txt > split_headers.csv
+sed -i 's/;/,/g' split_headers.csv 
+echo "id,Kingdom,Phylum,Class,Order,Family,Genus,Species" > silva_taxonomy.csv
+sed 's/^>//' split_headers.csv >> silva_taxonomy.csv
+```
+
+### Remove taxonomical information from SILVA fasta headers
+```
+sed -i 's/ .*//' SILVA138.2_16S_Bacteria.fasta
+```
+
+## Check number of bacterial sequences before and after filtering 
+```
+grep -c "Bacteria" SILVA_138.2_SSURef_NR99_tax_silva.fasta # 431166
+grep -c "Bacteria" SILVA138.2_16S_Bacteria.fasta # 431166; both numbers should be the same 
+```
 
 ## Sending all my filtered fastq files to my data dir
 ```
-mkdir -p filtered_fastq 16sequences_index_kma output_16s_refseq # inside data dir 
-mv raw_data/concatenated/chopper_filter//*_filtered.fastq ./filtered_fastq
+mkdir -p silva_16s_index_kma output_16s_silva filtered_fastq # inside data dir 
+mv raw_data/filtered/*_filt.fastq ./filtered_fastq
 ```
 
-## Create the databases needed to run KMA from a list of FASTA files
+## Index SILVA Database for KMA
 ```
-kma_index -i 16Ssequences.fasta -o 16sequences_index_kma/16Ssequences 
+kma_index -i SILVA138.2_16S_Bacteria.fasta  -o silva_16s_index_kma/SILVA_16S
 ```
 
-## Map and/or align raw reads to a template database created using kma_index
+## Map Reads to SILVA Database
 ```
 for file in filtered_fastq/*.fastq; do
     filename=$(basename "$file")  # Extract the filename
     filename_no_ext="${filename%.fastq}"  # Remove the file extension
-    kma -i "$file" -o "output_16s_refseq/${filename_no_ext}_kma" -t_db 16sequences_index_kma/16Ssequences -bcNano -bc 0.7 -ID 90 -ml 400 -1t1 -t 5
-done 
+    kma -i "$file" -o "output_16s_silva/${filename_no_ext}_kma" -t_db silva_16s_index_kma/SILVA_16S -bcNano -bc 0.7 -ID 90 -ml 400 -1t1 -t 5
+done
 ```
 
-### Unzipping frag files to use as input for taxonomical assignation 
+## Extract and Move Frag Files for Taxonomy Assignment
 ```
-gunzip ./*_kma.frag.gz 
-mv ./*.frag .. # move them all into data folder to ease downstream coding
+gunzip output_16s_silva/*.frag.gz
+mv output_16s_silva/*.frag ./data/
 ```
 
 # Taxonomy assignation to nanopore reads
@@ -112,8 +141,15 @@ Check scripts:
 08.Diversity_alpha.ipynb
 09.Diversity_beta.ipynb
 
+# Visualize taxonomy at different taxonomical levels
+Check script: 10.Visualize_Taxonomy.ipynb
 
+# Correlation analyses
+## Numeric variables
+Check script: 11.Corr_analysis1.ipynb
 
+## Categoric variables
+Check script: 12.Corr_analysis2.ipynb
 
 
 

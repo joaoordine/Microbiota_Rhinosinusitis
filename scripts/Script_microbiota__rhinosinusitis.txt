@@ -1,0 +1,714 @@
+# Script for microbiota analyses - rhinosinusitis
+
+# Sending raw files from server to my computer
+
+## Open server and get the path to the directory
+ssh joaovitor@143.107.198.52
+cd /media/Data/joaovitor/edwin/raw_data/ 
+pwd
+
+## Send files (do the command below on your computer's directory you plan on starting the analysis)
+scp -r joaovitor@143.107.198.52:/media/Data/joaovitor/edwin/raw_data .
+
+## Check if there's the same number of files on server and on your computer
+ls | grep -c '.fastq' # also check for metadata files 
+
+## Make metadata_nreads file
+echo -e "ID_Sample\tFilename\tnreads\tPatient\tTimepoint" > metadata_nreads.tsv # make the header
+
+for file in *.fastq; do 
+    nreads=$(($(wc -l < "$file") / 4))  # Count reads efficiently
+    ID_Sample="${file%.fastq}"  # Remove .fastq extension
+    Patient=$(echo "$ID_Sample" | sed -E 's/_T[0-9]+$//')  # Extract Patient ID
+    Timepoint=$(echo "$ID_Sample" | grep -oE 'T[0-9]+$')  # Extract Timepoint
+    echo -e "$ID_Sample\t$file\t$nreads\t$Patient\t$Timepoint" >> metadata_nreads.tsv # append it at the bottom of the header
+done
+
+###### R scripts: 01, 02, and 03
+
+# Quality control - before trimming raw ONT reads - NanoPack
+cd raw_data
+mkdir -p nanoqc_out
+
+## NanoPlot
+NanoPlot -o nanoqc_out/ --no_static --tsv_stats --N50 --threads 5 --fastq *.fastq 
+
+## NanoComp
+NanoComp -o nanoqc_out/ -t 5 --tsv_stats --make_no_static --fastq *.fastq
+
+## nanoQC
+for file in *.fastq; do
+    nanoQC -o nanoqc_out/ -l 400 "$file" 
+done
+
+
+
+## Do the same for each 'repetidos' directory 
+cd repetidos
+mkdir fastqc_before
+fastqc -o fastqc_before *.fastq
+multiqc fastqc_before
+mv multiqc_report.html multiqc_report_before.html
+
+cd ../repetidos2
+mkdir fastqc_before
+fastqc -o fastqc_before *.fastq
+multiqc fastqc_before
+mv multiqc_report.html multiqc_report_before.html
+
+# Remove repeated fastq files
+cd repetidos2
+mv *.fastq ../repetidos
+
+cd ../repetidos
+mv *.fastq ../
+
+# Trimming and filtering raw files - Chopper
+mkdir -p chopper_filter
+for file in *.fastq; do
+    chopper --quality 12 --minlength 1200 --maxlength 1800 --headcrop 100 --tailcrop 200 --threads 5 --input "$file" > chopper_filter/"${file%.fastq}_filtered.fastq"
+done
+
+## Count number of retained reads after 
+Check script 04.Chopper_counts.ipynb
+
+# Quality control - after trimming/clipping
+cd filtered
+mkdir fastqc_after # I created this directory inside the `filtered`one 
+fastqc -o fastqc_after *.fastq
+multiqc fastqc_after
+mv multiqc_report.html multiqc_report_after.html
+
+# Custom database creation
+## Used the same files used to annotate reads from mangrove sediments (16S RefSeq DB - NCBI)
+### Files to copy: 16Ssequences.fasta, new_taxdump.tar.gz (uncompressed files), RefseqTaxID.txt, referencetable_taxonomy_RefseqNCBI_16S.txt
+
+# Sending all my fastq files - filtered- to my data dir
+mkdir filtered_fastq # inside data dir
+mkdir 16sequences_index_kma
+mkdir output_16s_refseq
+mv raw_data/filtered/*_filt.fastq ./filtered_fastq
+
+# Create the databases needed to run KMA from a list of FASTA files
+kma_index -i 16Ssequences.fasta -o 16sequences_index_kma/16Ssequences 
+
+# Map and/or align raw reads to a template database created using kma_index
+for file in filtered_fastq/*.fastq; do
+    filename=$(basename "$file")  # Extract the filename
+    filename_no_ext="${filename%.fastq}"  # Remove the file extension
+    kma -i "$file" -o "output_16s_refseq/${filename_no_ext}_kma" -t_db 16sequences_index_kma/16Ssequences -bcNano -bc 0.7 -ID 90 -ml 400 -1t1 -t 5
+done 
+
+# Unzipping frag files to use as input for taxonomical assignation 
+gunzip ./*_kma.frag.gz 
+mv ./*.frag .. # move them all into data folder to ease downstream coding
+
+
+
+### ALTERNATIVE SINCE I GOT TIRED OF KMA: I'LL TRY MINIMAP2
+conda install bioconda::minimap2
+
+## Build an Index for Your 16S Database
+minimap2 -d 16Ssequences_refseq.mmi 16Ssequences_refseq.fasta
+
+## Align ONT Reads
+### Reference index
+REF_INDEX="16Ssequences_refseq.mmi"
+
+### Output directory
+OUT_DIR="minimap_out"
+mkdir -p "$OUT_DIR"
+
+### Loop through all fastq files
+for READS in *_filt.fastq; do
+    SAMPLE_NAME=$(basename "$READS" _filt.fastq)
+    OUTPUT_SAM="${OUT_DIR}/${SAMPLE_NAME}.sam"
+
+    echo "Processing $READS..."
+    
+    minimap2 -t 8 -ax map-ont --secondary=no --sam-hit-only --seed 1234 "$REF_INDEX" "$READS" > "$OUTPUT_SAM"
+done
+
+echo "All alignments completed."
+
+## Convert SAM to BAM
+conda install bioconda::samtools
+
+for file in *.sam; do
+    filename=$(basename "$file")  # Extract the filename
+    filename_no_ext="${filename%.sam}"  # Remove the file extension
+    samtools view -Sb "$file" > "${filename_no_ext}.bam"  # Convert SAM to BAM
+done
+
+
+################################################ R
+
+
+
+### Process rarefied data to plot - by Timepoint
+
+## Alpha diversity
+OTU = otu_table(rarefied_data, taxa_are_rows = FALSE) 
+sampledata = sample_data(metadata_filtered) 
+rownames(sampledata) <- sampledata$ID_Sample 
+sampledata <- sampledata[,-1] # Remove ID_Sample column to avoid redundancy
+
+## Compute alpha diversity indices
+physeq1 = phyloseq(OTU,sampledata) # Create phyloseq object
+richness <- estimate_richness(physeq1) # Compute alpha diversity indices
+richness$ID_Sample <- rownames(richness)  # Retain sample names
+
+write.table(richness, "AlhaDiversity_Indexes.tsv", quote = F, sep = "\t", row.names = T)
+
+# Load libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(rstatix)
+library(patchwork)
+
+# Ensure Timepoint is extracted from ID_Sample
+richness2 <- richness %>%
+  mutate(Timepoint = gsub(".*_(T[0-9]+)$", "\\1", ID_Sample),
+         Subject = gsub("_(T[0-9]+)$", "", ID_Sample))  # Extract Subject ID
+
+# Define the correct timepoint order
+timepoint_order <- c("T0", "T1", "T3", "T6", "T12")
+
+# Convert Timepoint to an ordered factor
+richness2$Timepoint <- factor(richness2$Timepoint, levels = timepoint_order, ordered = TRUE)
+
+# Function to perform Wilcoxon test and create boxplots for different alpha diversity metrics
+plot_alpha_diversity <- function(metric) {
+    # Perform Wilcoxon paired test for the chosen metric
+    wilcox_test_result <- richness2 %>%
+        select(Subject, Timepoint, !!sym(metric)) %>%  # Keep relevant columns
+        pivot_wider(names_from = Timepoint, values_from = !!sym(metric)) %>%  # Reshape for paired analysis
+        pivot_longer(cols = -Subject, names_to = "Timepoint", values_to = "Metric") %>%
+        mutate(Metric = as.numeric(Metric)) %>%
+        pairwise_wilcox_test(Metric ~ Timepoint, paired = TRUE, p.adjust.method = "bonferroni")
+    
+    print(wilcox_test_result)  # Print test results
+    
+    # Plot the chosen alpha diversity metric
+    plot <- ggplot(richness2, aes(x = Timepoint, y = !!sym(metric))) +
+        geom_boxplot(aes(fill = Timepoint), alpha = 0.5) +  # Boxplots with light fill
+        geom_jitter(width = 0.2, alpha = 0.8, color = "black") +  # Jitter for individual points
+        theme_minimal() +
+        labs(title = paste(metric, "Diversity Index Across Timepoints"),
+             x = "Timepoint",
+             y = paste(metric, "Index")) +
+        scale_fill_brewer(palette = "Set2") +  # Nice color scheme
+        theme(legend.position = "none")  # Remove legend since Timepoint is on x-axis
+    
+    return(plot)  # Return the plot object
+}
+
+# Apply the function for each metric (Shannon, Chao1, ACE, Simpson, Fisher, Observed)
+metrics <- c("Shannon", "Chao1", "ACE", "Simpson", "Fisher", "Observed")
+
+# Create a list of plots
+plots <- lapply(metrics, plot_alpha_diversity)
+
+# Combine the plots into a single grid
+combined_plot <- wrap_plots(plots, ncol = 2)  # Adjust ncol as needed (e.g., 2 columns)
+
+# Print the combined plot
+combined_plot
+
+# Plot differences in alpha diversity across timepoints by patients
+# Reshape data to long format
+richness2 %>%
+    pivot_longer(cols = c("Shannon", "Chao1", "ACE", "Simpson", "Fisher", "Observed"), 
+                 names_to = "Metric", 
+                 values_to = "Diversity") %>%
+    ggplot(aes(x = Timepoint, y = Diversity, group = Subject, color = Subject)) +
+    geom_line(alpha = 0.6) +  # Lines connecting paired points
+    geom_point(size = 3) +  # Individual points
+    theme_minimal() +
+    labs(title = "Changes in Diversity Metrics Across Timepoints",
+         x = "Timepoint",
+         y = "Diversity Metric") +
+    scale_color_manual(values = custom_colors) +  # Apply custom colors for subjects
+    theme(legend.position = "right") +  # Show the legend on the right
+    facet_wrap(~ Metric, scales = "free_y")  # Create separate plots for each metric
+
+
+#######################################################################
+
+
+## Beta diversity
+
+### Creating the relative abundance table
+tcast_data <- t(cast_data) # transposes the count data matrix to have samples as rows and taxa as columns
+relative_abundance <- (t(tcast_data) / apply(tcast_data, 2, sum))*100 # Calculates the relative abundance by dividing each count by the sum of counts in each sample and multiplying by 100 to get percentages; apply function Calculates the sum of counts for each sample
+relative_abundance <- t(relative_abundance) # Transposes the relative abundance matrix back to the original format.
+write.table(relative_abundance, file = "relative_abundance.tsv", sep = "\t", row.names = TRUE)
+
+### Calculates Bray-Curtis distances between samples
+bray_curtis_dist <- vegan::vegdist(t(relative_abundance), method = "bray") # Calculates the Bray-Curtis dissimilarity matrix using the transposed relative abundance matrix as input 
+bray_curtis_pcoa <- ecodist::pco(bray_curtis_dist) # Performs Principal Coordinate Analysis (PCoA) on the Bray-Curtis dissimilarity matrix to obtain principal coordinate axes
+
+bray_curtis_pcoa_df <- data.frame(pcoa1 = bray_curtis_pcoa$vectors[,1], 
+                                  pcoa2 = bray_curtis_pcoa$vectors[,2],
+                                  pcoa3 = bray_curtis_pcoa$vectors[,3]) 
+
+bray_curtis_pcoa_df$ID_Sample <- colnames(relative_abundance) # Assigns sample IDs as a new column in the data frame
+dist_metadata <- merge(metadata, bray_curtis_pcoa_df, by = "ID_Sample") # Merges the metadata with the PCoA results based on sample IDs.
+write.table(bray_curtis_pcoa_df, file = "PCoA_values_samples.tsv", sep = "\t", row.names = FALSE)
+
+dist_metadata_filt <- dist_metadata[dist_metadata$nreads >= 1000, ] # Filter out samples with <1000 reads
+write.table(dist_metadata_filt, file = "PCoA_values_samples_filt.tsv", sep = "\t", row.names = FALSE)
+
+### Setting up the parameters for plotting and its colors and groups 
+options(repr.plot.width=5, repr.plot.height=4)
+
+clustid_time <- dist_metadata_filt$Timepoint 
+clustid_patient <- dist_metadata_filt$Patient 
+
+my_palette4timepoint <- brewer.pal(n = 5, name = "Set1")  # Adjust 'n' based on the number of groups
+num_patients <- length(unique(dist_metadata_filt$Patient))
+my_palette4patients <- rainbow(num_patients)  
+
+group_time <- c("T0", "T1", "T3", "T6", "T12")
+group_patient <- unique(dist_metadata_filt$Patient)
+
+dist_metadata_filt$Timepoint <- factor(dist_metadata_filt$Timepoint, levels = group_time, ordered = TRUE)
+dist_metadata_filt$Patient <- factor(dist_metadata_filt$Patient, levels = group_patient, ordered = TRUE)
+
+bray_curtis_time <- ggplot(data = dist_metadata_filt, aes(x=pcoa1, y=pcoa2, color=factor(clustid_time))) +
+  geom_point(size = 4) +   
+  #stat_ellipse(level = 0.8) +
+        scale_color_manual(values = my_palette4timepoint) +
+        geom_hline(yintercept=0) +
+        geom_vline(xintercept=0) +
+  scale_color_manual(values = my_palette4timepoint) +
+  labs(x = "PC1",
+       y = "PC2", 
+       title = "Bray-Curtis PCoA") +
+  theme(title = element_text(size = 12), # makes titles smaller
+        axis.text.x = element_text(hjust = 1, size = 10, colour = "black", face="bold"),
+        axis.text.y = element_text(hjust = 1, size = 10, colour = "black", face="bold"),
+        axis.text = element_text(size = 12, colour = "black", face="bold"),
+        axis.title = element_text(size = 12, colour = "black", face="bold"))
+bray_curtis_time
+
+bray_curtis_patient <- ggplot(data = dist_metadata_filt, aes(x=pcoa1, y=pcoa2, color=factor(clustid_patient))) +
+  geom_point(size = 4) +   
+  #stat_ellipse(level = 0.8) +
+        scale_color_manual(values = my_palette4patients) +
+        geom_hline(yintercept=0) +
+        geom_vline(xintercept=0) +
+  scale_color_manual(values = my_palette4patients) +
+  labs(x = "PC1",
+       y = "PC2", 
+       title = "Bray-Curtis PCoA") +
+  theme(title = element_text(size = 12), # makes titles smaller
+        axis.text.x = element_text(hjust = 1, size = 10, colour = "black", face="bold"),
+        axis.text.y = element_text(hjust = 1, size = 10, colour = "black", face="bold"),
+        axis.text = element_text(size = 12, colour = "black", face="bold"),
+        axis.title = element_text(size = 12, colour = "black", face="bold"))
+bray_curtis_patient
+
+### Ploting PCoA using different metadata groups (boolean variables)
+# List of categorical variables to use for coloring
+color_vars <- c("Cortuse", "Sex", "Atopic_Symptoms", "Asthma", "NSAID_Intolerance")
+
+# Generate multiple plots
+plot_list <- lapply(color_vars, function(var) {
+    ggplot(data = dist_metadata_filt, aes(x = pcoa1, y = pcoa2, color = factor(!!sym(var)))) +
+        geom_point(size = 4) +   
+        #stat_ellipse(level = 0.8) +
+        geom_hline(yintercept = 0) +
+        geom_vline(xintercept = 0) +
+        labs(x = "PC1",
+             y = "PC2", 
+             color = var,  # Label for the legend
+             title = paste(var)) +
+        theme_minimal() +
+        theme(
+            title = element_text(size = 12),
+            axis.text = element_text(size = 12, colour = "black", face = "bold"),
+            axis.title = element_text(size = 12, colour = "black", face = "bold"),
+            legend.position = "right"
+        )
+})
+
+# Display the plots
+library(gridExtra)
+grid.arrange(grobs = plot_list, ncol = 3)
+
+### Ploting PCoA using different metadata groups (numeric variables)
+# Load necessary libraries
+library(ggplot2)
+library(gridExtra)
+
+# List of numeric variables to use for coloring
+numeric_vars <- c("SNOT22", "SNOT22nasal", "LK_Total", "LK_Secret", 
+                  "Total_IgE", "Blood_Eosinophilia", "Tissue_Eosinophilia")
+
+# Generate multiple PCoA plots with numeric color scales
+plot_list <- lapply(numeric_vars, function(var) {
+    ggplot(data = dist_metadata_filt, aes(x = pcoa1, y = pcoa2, color = !!sym(var))) +
+        geom_point(size = 4) +   
+        #stat_ellipse(level = 0.8) +
+        geom_hline(yintercept = 0, linetype = "dashed") +
+        geom_vline(xintercept = 0, linetype = "dashed") +
+        scale_color_viridis_c(option = "plasma") +  # Use a continuous color scale (viridis)
+        labs(x = "PC1",
+             y = "PC2", 
+             color = var,  # Legend label
+             title = paste(var)) +
+        theme_minimal() +
+        theme(
+            title = element_text(size = 12),
+            axis.text = element_text(size = 12, colour = "black", face = "bold"),
+            axis.title = element_text(size = 12, colour = "black", face = "bold"),
+            legend.position = "right"
+        )
+})
+
+# Display the plots
+grid.arrange(grobs = plot_list, ncol = 3)
+
+# Include the third PC to improve visualization 
+library(ggplot2)
+library(plotly)
+
+pcoa_3d_timepoint <- plot_ly(data = dist_metadata_filt, 
+                   x = ~pcoa1, 
+                   y = ~pcoa2, 
+                   z = ~pcoa3, 
+                   color = ~factor(Timepoint), 
+                   colors = my_palette4timepoint,
+                   text = ~ID_Sample, 
+                   type = "scatter3d", 
+                   mode = "markers") %>%
+  layout(scene = list(
+    xaxis = list(title = "PC1"),
+    yaxis = list(title = "PC2"),
+    zaxis = list(title = "PC3"),
+    title = "3D Bray-Curtis PCoA"
+  ))
+
+pcoa_3d_timepoint
+
+pcoa_3d_patient <- plot_ly(data = dist_metadata_filt, 
+                   x = ~pcoa1, 
+                   y = ~pcoa2, 
+                   z = ~pcoa3, 
+                   color = ~factor(Patient), 
+                   colors = my_palette4patients,
+                   text = ~ID_Sample, 
+                   type = "scatter3d", 
+                   mode = "markers") %>%
+  layout(scene = list(
+    xaxis = list(title = "PC1"),
+    yaxis = list(title = "PC2"),
+    zaxis = list(title = "PC3"),
+    title = "3D Bray-Curtis PCoA"
+  ))
+
+pcoa_3d_patient
+
+########## adapt plotly code to add a third PC to other scatter plots (bool and numeric variables in metadata)
+
+# Visualize taxonomy at different taxonomical levels 
+
+library(tidyverse)
+library(data.table)
+library(reshape2)
+#library(reshape)
+library(ggplot2)
+library(RColorBrewer)
+library(vegan)
+library(phyloseq)
+library(dplyr) 
+library(ggpubr)
+library(Hmisc)
+library(corrplot)
+library(scales)
+library(broom)
+library(ecodist)
+
+## Create color palette
+purples <- brewer.pal(n = 5, name = "BuPu")[-c(1:4)] # taking a few colors from the RColorBrewer Package
+blues <- rev(brewer.pal(n = 5, name = "Blues")[-1])
+greens <- brewer.pal(n = 5, name = "YlGn")[-1]
+oranges <- c("#FFEC8B", "#FECC5C", "#fe9a4d", "#fe6f01") # appending some nice oranges, reds, purples, beiges and aquamarines
+reds <- c("#b30024", "#ff0033", "#ff554d", "#ff9e99")
+purples <- append(purples, c("#ac39ac", "#cc66cc", "#ffb3ff"))
+beiges <- c("#999966", "#adad85", "#ccccb3")
+aquamarines <- c("#25a696", "#43d6c5", "#96e8df")
+pinks <- c("#9F2B68", "#F33A6A")
+gray <- c("#808080")
+custom_colors <- c(blues, reds, oranges, greens, purples, rev(beiges), aquamarines, pinks) # combinig all colors in a single vector
+  
+## genus 
+### Parameters to set before running and choosing taxonomic level to plot
+# Assuming dfall_1000 is your data frame with relative abundance data.
+df2 <- aggregate(ReadCounts_TaxAnnotation$Counts, 
+                 list(ReadCounts_TaxAnnotation$Genus, ReadCounts_TaxAnnotation$ID_Sample, ReadCounts_TaxAnnotation$Timepoint), 
+                 FUN=sum) # Aggregates counts based on the ID_Sample and Timepoint
+colnames(df2) <- c("Taxa", "ID_Sample", "Timepoint", "Counts")
+
+# Create relative abundance data
+cast_data = acast(df2, Timepoint ~ Taxa, value.var = "Counts", fun.aggregate = sum)
+cast_data[is.na(cast_data)] <- 0 # Replace missing values with 0
+
+### Calculating relative abundance
+tcast_data <- t(cast_data)
+relative_abundance <- (t(tcast_data) / apply(tcast_data, 2, sum)) * 100
+df_relab <- melt(relative_abundance) # Reshape data frame
+
+# Rename columns
+colnames(df_relab) <- c("Timepoint", "Taxa", "RelativeAbundance") 
+df_relab <- df_relab[-which(df_relab$RelativeAbundance == 0),] # Remove rows with zero relative abundance
+
+# Filter taxa above a certain threshold (e.g., 1.5%) and send those below the threshold to df_relab_others
+df_relab_filt <- subset(df_relab, RelativeAbundance > 1.5)
+
+df_relab_filt$Timepoint <- factor(df_relab_filt$Timepoint, levels = c("T0", "T1", "T3", "T6", "T12"))
+
+df_relab_filt <- df_relab_filt %>%
+  mutate(Taxa = factor(Taxa, levels = c(setdiff(unique(Taxa), "Others"), "Others")))
+
+## Assign colors to taxa, ensuring 'Others' is always gray
+unique_taxa <- setdiff(unique(df_relab_filt$Taxa), "Others")  # Exclude 'Others'
+color_palette <- setNames(custom_colors[seq_along(unique_taxa)], unique_taxa)  # Assign colors
+color_palette["Others"] <- "gray"  # Explicitly set 'Others' to gray
+
+# Plot the relative abundance bar plot with all bars in a single grid
+genus_plot <- ggplot(data = df_relab_filt, 
+                     aes(x = Timepoint, 
+                         y = RelativeAbundance, 
+                         fill = factor(Taxa, levels = c("Others", setdiff(unique(df_relab_filt$Taxa), "Others"))))) + 
+    geom_bar(stat = "identity", position = "stack", colour = "black") +
+    scale_fill_manual(values = color_palette) + 
+    labs(x = "Timepoint", y = "Relative Abundance (%)") +
+    theme_bw() +
+    theme(axis.title.x = element_text(size = 20, face = "bold", color = "black"),
+          axis.text.x = element_text(size = 16, face = "bold", color = "black"),
+          axis.title.y = element_text(size = 20, face = "bold", color = "black"),
+          axis.text.y = element_text(size = 16, face = "bold", color = "black"),
+          strip.text.x = element_text(size = 16, face = "bold", color = "black"),
+          legend.title = element_blank(),
+          legend.text = element_text(size = 12, face = "bold"),
+          axis.ticks.x = element_blank(),
+          strip.background = element_rect(fill = "white"),
+          panel.grid = element_blank(), # Optional: Removes grid lines
+          legend.position = "right") +
+    theme(legend.key.size = unit(0.5, "cm")) # Optional: Adjust legend key size
+
+# Display the plot
+print(genus_plot)
+
+# Phylum-Level Relative Abundance Plot
+# Aggregate counts at the phylum level
+df_phylum <- aggregate(ReadCounts_TaxAnnotation$Counts, 
+                       list(ReadCounts_TaxAnnotation$Phylum, ReadCounts_TaxAnnotation$ID_Sample, ReadCounts_TaxAnnotation$Timepoint), 
+                       FUN=sum) 
+colnames(df_phylum) <- c("Taxa", "ID_Sample", "Timepoint", "Counts")
+
+# Create relative abundance data
+cast_data_phylum = acast(df_phylum, Timepoint ~ Taxa, value.var = "Counts", fun.aggregate = sum)
+cast_data_phylum[is.na(cast_data_phylum)] <- 0 # Replace missing values with 0
+
+# Calculating relative abundance
+tcast_data_phylum <- t(cast_data_phylum)
+relative_abundance_phylum <- (t(tcast_data_phylum) / apply(tcast_data_phylum, 2, sum)) * 100
+df_relab_phylum <- melt(relative_abundance_phylum) # Reshape data frame
+
+# Rename columns
+colnames(df_relab_phylum) <- c("Timepoint", "Taxa", "RelativeAbundance") 
+df_relab_phylum <- df_relab_phylum[-which(df_relab_phylum$RelativeAbundance == 0),] # Remove rows with zero relative abundance
+
+# Filter taxa above threshold (e.g., 1.5%)
+df_relab_phylum_filt <- subset(df_relab_phylum, RelativeAbundance > 1.5)
+
+# Order Timepoints
+df_relab_phylum_filt$Timepoint <- factor(df_relab_phylum_filt$Timepoint, levels = c("T0", "T1", "T3", "T6", "T12"))
+
+df_relab_phylum_filt <- df_relab_phylum_filt %>%
+  mutate(Taxa = factor(Taxa, levels = c(setdiff(unique(Taxa), "Others"), "Others")))
+
+## Assign colors to taxa, ensuring 'Others' is always gray
+unique_taxa <- setdiff(unique(df_relab_phylum_filt$Taxa), "Others")  # Exclude 'Others'
+color_palette <- setNames(custom_colors[seq_along(unique_taxa)], unique_taxa)  # Assign colors
+color_palette["Others"] <- "gray"  # Explicitly set 'Others' to gray
+
+
+# Plot
+phylum_plot <- ggplot(data = df_relab_phylum_filt, 
+                      aes(x = Timepoint, 
+                          y = RelativeAbundance, 
+                          fill = factor(Taxa, levels = c("Others", setdiff(unique(df_relab_phylum_filt$Taxa), "Others"))))) + 
+    geom_bar(stat = "identity", position = "stack", colour = "black") +
+    scale_fill_manual(values = color_palette) + 
+    labs(x = "Timepoint", y = "Relative Abundance (%)") +
+    theme_bw() +
+    theme(axis.title.x = element_text(size = 20, face = "bold", color = "black"),
+          axis.text.x = element_text(size = 16, face = "bold", color = "black"),
+          axis.title.y = element_text(size = 20, face = "bold", color = "black"),
+          axis.text.y = element_text(size = 16, face = "bold", color = "black"),
+          strip.text.x = element_text(size = 16, face = "bold", color = "black"),
+          legend.title = element_blank(),
+          legend.text = element_text(size = 12, face = "bold"),
+          axis.ticks.x = element_blank(),
+          strip.background = element_rect(fill = "white"),
+          panel.grid = element_blank(), # Optional: Removes grid lines
+          legend.position = "right") +
+    theme(legend.key.size = unit(0.5, "cm")) # Optional: Adjust legend key size
+
+# Display the plot
+print(phylum_plot)
+
+# Family-Level Relative Abundance Plot
+# Aggregate counts at the family level
+df_family <- aggregate(ReadCounts_TaxAnnotation$Counts, 
+                       list(ReadCounts_TaxAnnotation$Family, ReadCounts_TaxAnnotation$ID_Sample, ReadCounts_TaxAnnotation$Timepoint), 
+                       FUN=sum) 
+colnames(df_family) <- c("Taxa", "ID_Sample", "Timepoint", "Counts")
+
+# Create relative abundance data
+cast_data_family = acast(df_family, Timepoint ~ Taxa, value.var = "Counts", fun.aggregate = sum)
+cast_data_family[is.na(cast_data_family)] <- 0 # Replace missing values with 0
+
+# Calculating relative abundance
+tcast_data_family <- t(cast_data_family)
+relative_abundance_family <- (t(tcast_data_family) / apply(tcast_data_family, 2, sum)) * 100
+df_relab_family <- melt(relative_abundance_family) # Reshape data frame
+
+# Rename columns
+colnames(df_relab_family) <- c("Timepoint", "Taxa", "RelativeAbundance") 
+df_relab_family <- df_relab_family[-which(df_relab_family$RelativeAbundance == 0),] # Remove rows with zero relative abundance
+
+# Filter taxa above threshold (e.g., 1.5%)
+df_relab_family_filt <- subset(df_relab_family, RelativeAbundance > 1.5)
+
+# Order Timepoints
+df_relab_family_filt$Timepoint <- factor(df_relab_family_filt$Timepoint, levels = c("T0", "T1", "T3", "T6", "T12"))
+
+df_relab_family_filt <- df_relab_family_filt %>%
+  mutate(Taxa = factor(Taxa, levels = c(setdiff(unique(Taxa), "Others"), "Others")))
+
+## Assign colors to taxa, ensuring 'Others' is always gray
+unique_taxa <- setdiff(unique(df_relab_family_filt$Taxa), "Others")  # Exclude 'Others'
+color_palette <- setNames(custom_colors[seq_along(unique_taxa)], unique_taxa)  # Assign colors
+color_palette["Others"] <- "gray"  # Explicitly set 'Others' to gray
+
+# Plot
+family_plot <- ggplot(data = df_relab_family_filt, 
+                      aes(x = Timepoint, 
+                          y = RelativeAbundance, 
+                          fill = factor(Taxa, levels = c("Others", setdiff(unique(df_relab_family_filt$Taxa), "Others"))))) + 
+    geom_bar(stat = "identity", position = "stack", colour = "black") +
+    scale_fill_manual(values = color_palette) + 
+    labs(x = "Timepoint", y = "Relative Abundance (%)") +
+    theme_bw() +
+    theme(axis.title.x = element_text(size = 20, face = "bold", color = "black"),
+          axis.text.x = element_text(size = 16, face = "bold", color = "black"),
+          axis.title.y = element_text(size = 20, face = "bold", color = "black"),
+          axis.text.y = element_text(size = 16, face = "bold", color = "black"),
+          strip.text.x = element_text(size = 16, face = "bold", color = "black"),
+          legend.title = element_blank(),
+          legend.text = element_text(size = 12, face = "bold"),
+          axis.ticks.x = element_blank(),
+          strip.background = element_rect(fill = "white"),
+          panel.grid = element_blank(), # Optional: Removes grid lines
+          legend.position = "right") +
+    theme(legend.key.size = unit(0.5, "cm")) # Optional: Adjust legend key size
+
+# Display the plot
+print(family_plot)
+
+# Species-Level Relative Abundance Plot
+# Aggregate counts at the species level
+df_species <- aggregate(ReadCounts_TaxAnnotation$Counts, 
+                       list(ReadCounts_TaxAnnotation$Species, ReadCounts_TaxAnnotation$ID_Sample, ReadCounts_TaxAnnotation$Timepoint), 
+                       FUN=sum) 
+colnames(df_species) <- c("Taxa", "ID_Sample", "Timepoint", "Counts")
+
+# Create relative abundance data
+cast_data_species = acast(df_species, Timepoint ~ Taxa, value.var = "Counts", fun.aggregate = sum)
+cast_data_species[is.na(cast_data_species)] <- 0 # Replace missing values with 0
+
+# Calculating relative abundance
+tcast_data_species <- t(cast_data_species)
+relative_abundance_species <- (t(tcast_data_species) / apply(tcast_data_species, 2, sum)) * 100
+df_relab_species <- melt(relative_abundance_species) # Reshape data frame
+
+# Rename columns
+colnames(df_relab_species) <- c("Timepoint", "Taxa", "RelativeAbundance") 
+df_relab_species <- df_relab_species[-which(df_relab_species$RelativeAbundance == 0),] # Remove rows with zero relative abundance
+
+# Filter taxa above threshold (e.g., 1.5%)
+df_relab_species_filt <- subset(df_relab_species, RelativeAbundance > 1.5)
+
+## Manually calculate others, complete the % of 'Others' in each timepoint and update _filt df back with the same name
+## I'll calculate the sum of relative abundances in each timepoint and the remaining value to 100 represents other genera (less abundant)
+df_sum <- df_relab_species_filt %>%
+    group_by(Timepoint) %>%
+    summarise(TotalAbundance = sum(RelativeAbundance))
+
+print(df_sum) ## subtract 100 from the value and manually fill in "Others" relative abundance in each timepoint displayed in df_relab_filt in the end
+
+# Order Timepoints
+df_relab_species_filt$Timepoint <- factor(df_relab_species_filt$Timepoint, levels = c("T0", "T1", "T3", "T6", "T12"))
+
+df_relab_species_filt <- df_relab_species_filt %>%
+  mutate(Taxa = factor(Taxa, levels = c(setdiff(unique(Taxa), "Others"), "Others")))
+
+## Assign colors to taxa, ensuring 'Others' is always gray
+unique_taxa <- setdiff(unique(df_relab_species_filt$Taxa), "Others")  # Exclude 'Others'
+color_palette <- setNames(custom_colors[seq_along(unique_taxa)], unique_taxa)  # Assign colors
+color_palette["Others"] <- "gray"  # Explicitly set 'Others' to gray
+
+# Plot
+species_plot <- ggplot(data = df_relab_species_filt, 
+                      aes(x = Timepoint, 
+                          y = RelativeAbundance, 
+                          fill = factor(Taxa, levels = c("Others", setdiff(unique(df_relab_species_filt$Taxa), "Others"))))) + 
+    geom_bar(stat = "identity", position = "stack", colour = "black") +
+    scale_fill_manual(values = color_palette) + 
+    labs(x = "Timepoint", y = "Relative Abundance (%)") +
+    theme_bw() +
+    theme(axis.title.x = element_text(size = 20, face = "bold", color = "black"),
+          axis.text.x = element_text(size = 16, face = "bold", color = "black"),
+          axis.title.y = element_text(size = 20, face = "bold", color = "black"),
+          axis.text.y = element_text(size = 16, face = "bold", color = "black"),
+          strip.text.x = element_text(size = 16, face = "bold", color = "black"),
+          legend.title = element_blank(),
+          legend.text = element_text(size = 12, face = "bold"),
+          axis.ticks.x = element_blank(),
+          strip.background = element_rect(fill = "white"),
+          panel.grid = element_blank(), # Optional: Removes grid lines
+          legend.position = "right") +
+    theme(legend.key.size = unit(0.5, "cm")) # Optional: Adjust legend key size
+
+# Display the plot
+print(species_plot)
+
+################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,18 @@
+# NanoPack for ONT reads quality assessment
+
+## NanoPlot
+NanoPlot -o nanoqc_out/ --no_static --tsv_stats --N50 --threads 5 --fastq *.fastq # run this before and after trimming/clipping files with chopper
+
+## NanoComp
+NanoComp -o nanoqc_out/ -t 5 --tsv_stats --make_no_static --fastq *.fastq
+
+## nanoQC
+for file in *.fastq; do
+    nanoQC -o nanoqc_out/ -l 400 "$file" 
+done
+
+## Chopper
+for file in *.fastq; do
+    chopper --quality 12 --minlength 1200 --maxlength 1800 --headcrop 100 --tailcrop 200 --threads 5 --input "$file" > chopper_filter/"${file%.fastq}_filtered.fastq"
+done
+

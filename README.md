@@ -151,6 +151,8 @@ Check script: 11.Corr_analysis1.ipynb
 ## Categoric variables
 Check script: 12.Corr_analysis2.ipynb
 
+# Additional correlation and statistical analyses
+Check script: cor_addit_organized.ipynb
 
 
 

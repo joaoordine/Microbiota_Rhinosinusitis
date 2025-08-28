@@ -1,0 +1,101 @@
+# Creating 16S database - SILVA
+
+# Download full SILVA 16S database 
+https://www.arb-silva.de/no_cache/download/archive/current/Exports/ ## choose SILVA_138.2_SSURef_NR99_tax_silva.fasta.gz or the current version 
+
+gunzip SILVA_138.2_SSURef_NR99_tax_silva.fasta.gz # move it to data dir and unzip it
+
+# Filter out sequences that arent from bacteria 
+awk '/^>/ {p = ($0 ~ /Bacteria;/)} p' SILVA_138.2_SSURef_NR99_tax_silva.fasta > SILVA138.2_16S_Bacteria.fasta 
+
+# Make a taxonomical table linked with the ID from Silva
+grep "^>" SILVA138.2_16S_Bacteria.fasta > headers_silva.txt
+awk -F' ' '{print $1 "," substr($0, index($0,$2))}' headers_silva.txt > split_headers.csv
+sed -i 's/;/,/g' split_headers.csv 
+echo "id,Kingdom,Phylum,Class,Order,Family,Genus,Species" > silva_taxonomy.csv
+sed 's/^>//' split_headers.csv >> silva_taxonomy.csv
+
+# Remove taxonomical information from SILVA fasta headers
+sed -i 's/ .*//' SILVA138.2_16S_Bacteria.fasta
+
+# Check number of bacterial sequences before and after filtering 
+grep -c "Bacteria" SILVA_138.2_SSURef_NR99_tax_silva.fasta # 431166
+grep -c "Bacteria" SILVA138.2_16S_Bacteria.fasta # 431166; both numbers should be the same 
+
+# Sending all my filtered fastq files to my data dir
+mkdir -p silva_16s_index_kma output_16s_silva filtered_fastq
+mv raw_data/filtered/*_filt.fastq ./filtered_fastq
+
+# Index SILVA Database for KMA
+kma_index -i SILVA138.2_16S_Bacteria.fasta  -o silva_16s_index_kma/SILVA_16S
+
+# Map Reads to SILVA Database
+for file in filtered_fastq/*.fastq; do
+    filename=$(basename "$file")  # Extract the filename
+    filename_no_ext="${filename%.fastq}"  # Remove the file extension
+    kma -i "$file" -o "output_16s_silva/${filename_no_ext}_kma" -t_db silva_16s_index_kma/SILVA_16S -bcNano -bc 0.7 -ID 90 -ml 400 -1t1 -t 5
+done
+
+
+
+
+    kma -i "$file" -o "output_16s_refseq/${filename_no_ext}_kma" -t_db 16sequences_index_kma/16Ssequences 
+done 
+
+# Extract and Move Frag Files for Taxonomy Assignment
+gunzip output_16s_silva/*.frag.gz
+mv output_16s_silva/*.frag ./data/
+
+##### R ####################
+
+# Loading reference file (linking refseq accession number and taxID
+SILVATaxID <- read.csv("./silva_taxonomy.csv", h=T)
+
+
+
+
+
+##### SPARCC CORRELATION ###### python
+# Create a script for transposing table
+## transpose_table.py
+import pandas as pd
+import sys
+
+input_file = sys.argv[1]
+output_file = sys.argv[2]
+
+df = pd.read_csv(input_file, sep="\t", index_col=0)
+df.T.to_csv(output_file, sep="\t")
+
+## Run it 
+python transpose_table.py Abund_by_Timepoint_4_Corr_T6.tsv T6_transposed.tsv
+
+# Run sparcc
+python Compute_SparCC.py T6_transposed.tsv --cor_file T6_sparcc_cor.tsv --cov_file T6_sparcc_cov.tsv
+
+# Create bootstraps
+python MakeBootstraps.py T6_transposed.tsv -n 100 -t T6_boot
+
+# Run SparCC on each bootstrap
+for i in {0..99}; do
+    python Compute_SparCC.py T6_boot$i.tsv --cor_file T6_boot_out$i.tsv --cov_file null
+done
+
+# Compute pseudo p-values
+## Create a file with the bootstrap correlation outputs:
+ls T6_boot_out*.tsv > T6_boots.txt
+
+## Run it
+python PseudoPvals.py T6_sparcc_cor.tsv T6_boots.txt T6_pseudo_pvals.tsv 100 -t two_sided
+
+
+
+
+
+
+
+
+
+
+
+
